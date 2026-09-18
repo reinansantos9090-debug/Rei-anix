@@ -1,12 +1,17 @@
-name: Build Android APK
+name: Build ReiFlix Android APK
 
 on:
   push:
-    branches: [ main ]
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -14,24 +19,78 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: "3.12"
+          cache: pip
 
-      - name: Install Flutter
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools build-tools;35.0.0 platforms;android-35 cmdline-tools;latest'
+
+      - name: Accept Android SDK Licenses
+        run: |
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
+
+      - name: Install Android platform
+        run: sdkmanager --install "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.19.x'
-          channel: 'stable'
+          flutter-version: "3.44.8"
+          channel: stable
           cache: true
 
-      - name: Install Flet CLI
-        run: pip install flet
+      - name: Install Python and Flet build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt "flet[cli]==0.86.5"
+          flet --version
+          flutter --version
 
-      - name: Build Flet APK
-        run: flet build apk --project-name "ReiFlix" --description "Seu gerenciador de animes local"
+      - name: Validate JSON configuration
+        shell: bash
+        run: |
+          while IFS= read -r -d '' file; do
+            python -m json.tool "$file" >/dev/null
+            echo "Valid JSON: $file"
+          done < <(find . -path './.git' -prune -o -path './build' -prune -o -type f -name '*.json' -print0)
 
-      - name: Upload APK Artifact
+      - name: Validate Python application
+        run: |
+          python -m compileall -q main.py app_config.py core views
+          git diff --check
+
+      - name: Prepare ReiFlix native Android host template
+        run: |
+          git clone --depth 1 https://github.com/flet-dev/flet-build-template.git build/flet-build-template
+          python scripts/prepare_flet_template.py --template build/flet-build-template --overlay android
+
+      - name: Build APK
+        run: flet build apk --template build/flet-build-template --yes -v
+
+      - name: Locate APK
+        id: apk
+        shell: bash
+        run: |
+          apk="$(find build -type f -name '*.apk' -print -quit)"
+          test -n "$apk"
+          test -s "$apk"
+          echo "path=$apk" >> "$GITHUB_OUTPUT"
+          file "$apk"
+          python scripts/verify_android_host.py "$apk"
+
+      - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: app-release
-          path: build/apk/app-release.apk
+          name: reiflix-local-apk
+          path: ${{ steps.apk.outputs.path }}
+          if-no-files-found: error
 
